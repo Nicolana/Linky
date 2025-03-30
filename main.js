@@ -120,6 +120,10 @@ function initBroadcastServer() {
     // 创建 UDP socket
     broadcastServer = dgram.createSocket('udp4');
     
+    // 获取本机IP
+    const localIP = getLocalIP();
+    console.log('本机IP:', localIP);
+    
     // 监听消息
     broadcastServer.on('message', (msg, rinfo) => {
         try {
@@ -127,6 +131,12 @@ function initBroadcastServer() {
             // 添加设备IP和最后在线时间
             deviceInfo.ip = rinfo.address;
             deviceInfo.lastSeen = Date.now();
+            
+            // 检查是否是本机设备（过滤掉自己）
+            if (deviceInfo.ip === localIP) {
+                console.log('收到本机广播，已忽略');
+                return;
+            }
             
             // 通知渲染进程发现新设备
             mainWindow.webContents.send('device-discovered', deviceInfo);
@@ -149,7 +159,7 @@ function initBroadcastServer() {
     setInterval(() => {
         const deviceInfo = {
             name: app.getName(),
-            ip: getLocalIP(),
+            ip: localIP, // 使用缓存的本机IP
             status: 'online',
             lastSeen: Date.now(),
             sharedDir: store.get('sharedDir') || path.join(app.getPath('home'), 'SharedFiles')
@@ -268,6 +278,16 @@ async function checkDeviceConnectivity(ip, port, timeout = 3000) {
 
 // 处理文件传输请求
 ipcMain.handle('start-transfer', async (event, { filePath, targetDevice }) => {
+    // 检查目标设备是否是本机
+    const localIP = getLocalIP();
+    if (targetDevice.ip === localIP || targetDevice.ip === '127.0.0.1' || targetDevice.ip === 'localhost') {
+        console.error('尝试向自己发送文件');
+        return { 
+            error: '不能向自己发送文件。请选择其他设备作为目标。', 
+            code: 'SELF_TRANSFER' 
+        };
+    }
+    
     // 修正文件路径，确保正确的路径分隔符
     let correctedFilePath = filePath;
     

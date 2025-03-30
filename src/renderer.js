@@ -22,8 +22,41 @@ let selectedDeviceIp = null;
 
 // 设备发现处理
 ipcRenderer.on('device-discovered', (event, deviceInfo) => {
+    console.log('发现设备:', deviceInfo);
+    
+    // 检查是否是本机IP
+    if (deviceInfo.ip === '127.0.0.1' || deviceInfo.ip === 'localhost') {
+        console.log('忽略本机设备');
+        return;
+    }
+    
+    // 更新设备信息
     devices.set(deviceInfo.ip, deviceInfo);
     updateDeviceList();
+});
+
+// 清理离线设备
+ipcRenderer.on('clean-offline-devices', (event, { threshold, currentTime }) => {
+    let hasChanges = false;
+    
+    // 遍历所有设备，移除超时的设备
+    for (const [ip, device] of devices.entries()) {
+        if (currentTime - device.lastSeen > threshold) {
+            console.log(`设备离线: ${device.name} (${ip})`);
+            devices.delete(ip);
+            hasChanges = true;
+            
+            // 如果当前选中的设备离线了，清除选中状态
+            if (selectedDeviceIp === ip) {
+                selectedDeviceIp = null;
+            }
+        }
+    }
+    
+    // 如果有设备被移除，更新设备列表
+    if (hasChanges) {
+        updateDeviceList();
+    }
 });
 
 // 更新设备列表
@@ -162,6 +195,26 @@ async function shareFile(filePath) {
         return;
     }
     
+    // 获取选中的设备
+    const selectedDevice = document.querySelector('.device-item.selected');
+    if (!selectedDevice) {
+        alert('请先选择一个目标设备');
+        return;
+    }
+
+    const targetDevice = {
+        ip: selectedDevice.dataset.ip,
+        name: selectedDevice.querySelector('.device-name').textContent
+    };
+    
+    console.log('传输目标设备:', targetDevice);
+    
+    // 检查是否正在向自己发送
+    if (targetDevice.ip === '127.0.0.1' || targetDevice.ip === 'localhost') {
+        alert('不能向自己发送文件。请选择其他设备作为目标。');
+        return;
+    }
+    
     const transferId = Date.now().toString();
     const transfer = {
         id: transferId,
@@ -175,20 +228,6 @@ async function shareFile(filePath) {
     updateTransferCount();
 
     try {
-        // 获取选中的设备
-        const selectedDevice = document.querySelector('.device-item.selected');
-        if (!selectedDevice) {
-            alert('请先选择一个目标设备');
-            return;
-        }
-
-        const targetDevice = {
-            ip: selectedDevice.dataset.ip,
-            name: selectedDevice.querySelector('.device-name').textContent
-        };
-        
-        console.log('传输目标设备:', targetDevice);
-
         // 通知主进程开始传输
         const result = await ipcRenderer.invoke('start-transfer', {
             filePath,
