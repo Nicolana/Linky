@@ -89,8 +89,8 @@ function updateFileList() {
         file.name.toLowerCase().includes(searchTerm)
     );
 
-    fileList.innerHTML = filteredFiles.map(file => `
-        <div class="file-item">
+    fileList.innerHTML = filteredFiles.map((file, index) => `
+        <div class="file-item" data-index="${index}">
             <div class="col-name">
                 <span class="file-icon">${file.isDirectory ? '📁' : '📄'}</span>
                 ${file.name}
@@ -98,10 +98,19 @@ function updateFileList() {
             <div class="col-size">${formatFileSize(file.size)}</div>
             <div class="col-date">${formatDate(file.modified)}</div>
             <div class="col-actions">
-                <button class="btn" onclick="shareFile('${file.path}')">分享</button>
+                <button class="btn share-btn" data-index="${index}">分享</button>
             </div>
         </div>
     `).join('');
+    
+    // 使用事件委托添加点击事件处理
+    fileList.querySelectorAll('.share-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const index = parseInt(e.target.dataset.index);
+            const fileToShare = filteredFiles[index];
+            shareFile(fileToShare.path);
+        });
+    });
 }
 
 // 文件搜索
@@ -123,6 +132,34 @@ function formatDate(date) {
 
 // 分享文件
 async function shareFile(filePath) {
+    console.log('准备分享文件:', filePath);
+    
+    // 确保文件路径格式正确（Windows 路径修正）
+    if (process.platform === 'win32') {
+        // 检查路径是否缺少分隔符
+        if (filePath.match(/^[A-Z]:(?![\\\/])/)) {
+            // 在驱动器号后添加分隔符
+            filePath = filePath.replace(/^([A-Z]:)/, '$1\\');
+            console.log('修正后的路径:', filePath);
+        }
+        
+        // 确保使用反斜杠作为路径分隔符
+        filePath = filePath.replace(/\//g, '\\');
+        
+        // 修复可能的连续分隔符
+        filePath = filePath.replace(/\\{2,}/g, '\\');
+    }
+    
+    // 检查文件是否存在
+    try {
+        fs.accessSync(filePath, fs.constants.F_OK);
+        console.log('文件存在，开始传输');
+    } catch (err) {
+        console.error('文件不存在:', filePath, err);
+        alert(`文件不存在: ${filePath}`);
+        return;
+    }
+    
     const transferId = Date.now().toString();
     const transfer = {
         id: transferId,
@@ -147,30 +184,50 @@ async function shareFile(filePath) {
             ip: selectedDevice.dataset.ip,
             name: selectedDevice.querySelector('.device-name').textContent
         };
+        
+        console.log('传输目标设备:', targetDevice);
 
         // 通知主进程开始传输
-        await ipcRenderer.invoke('start-transfer', {
+        const result = await ipcRenderer.invoke('start-transfer', {
             filePath,
             targetDevice
         });
+        
+        console.log('传输开始结果:', result);
+        
+        // 检查是否有错误
+        if (result && result.error) {
+            alert(`传输失败: ${result.error}`);
+            transfers.delete(transferId);
+            updateTransferList();
+            updateTransferCount();
+            return;
+        }
 
         // 监听传输进度
-        ipcRenderer.on(`transfer-progress-${transferId}`, (event, progress) => {
-            transfer.progress = progress;
-            updateTransferList();
+        ipcRenderer.on('transfer-progress', (event, data) => {
+            if (data.id === transferId) {
+                transfer.progress = data.progress;
+                updateTransferList();
+            }
         });
 
         // 监听传输完成
-        ipcRenderer.once(`transfer-complete-${transferId}`, () => {
-            transfer.status = 'completed';
-            updateTransferList();
+        ipcRenderer.on('transfer-completed', (event, id) => {
+            if (id === transferId) {
+                transfer.status = 'completed';
+                transfer.progress = 100;
+                updateTransferList();
+            }
         });
 
         // 监听传输错误
-        ipcRenderer.once(`transfer-error-${transferId}`, (event, error) => {
-            transfer.status = 'error';
-            alert(`传输失败: ${error}`);
-            updateTransferList();
+        ipcRenderer.on('transfer-error', (event, data) => {
+            if (data.id === transferId) {
+                transfer.status = 'error';
+                alert(`传输失败: ${data.error}`);
+                updateTransferList();
+            }
         });
 
     } catch (error) {
@@ -232,4 +289,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (savedDir) {
         loadFiles(savedDir);
     }
+    
+    // 添加日志功能，用于调试
+    window.logFilePath = (path) => {
+        console.log(`文件路径: "${path}"`);
+        console.log(`文件路径长度: ${path.length}`);
+        console.log(`文件路径编码: ${encodeURIComponent(path)}`);
+    };
 }); 
