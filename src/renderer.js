@@ -170,7 +170,7 @@ function updateFileList() {
         btn.addEventListener('click', (e) => {
             const index = parseInt(e.target.dataset.index);
             const fileToShare = filteredFiles[index];
-            shareFile(fileToShare.path);
+            shareFile(fileToShare);
         });
     });
 }
@@ -193,8 +193,9 @@ function formatDate(date) {
 }
 
 // 分享文件
-async function shareFile(filePath) {
-    console.log('准备分享文件:', filePath);
+async function shareFile(fileToShare) {
+    console.log('准备分享文件:', fileToShare.path);
+    let filePath = fileToShare.path;
     
     // 确保文件路径格式正确（Windows 路径修正）
     if (process.platform === 'win32') {
@@ -214,24 +215,38 @@ async function shareFile(filePath) {
     
     // 检查文件是否存在
     try {
-        fs.accessSync(filePath, fs.constants.F_OK);
-        console.log('文件存在，开始传输');
+        // 使用同步方法避免异步问题
+        const stats = fs.statSync(filePath);
+        
+        // 检查是否是目录
+        if (stats.isDirectory()) {
+            alert(`不能传输文件夹: ${filePath}`);
+            return;
+        }
+        
+        // 检查文件是否太大（超过2GB）
+        const maxFileSize = 2 * 1024 * 1024 * 1024; // 2GB
+        if (stats.size > maxFileSize) {
+            alert(`文件过大，不能超过2GB: ${formatFileSize(stats.size)}`);
+            return;
+        }
+        
+        console.log('文件存在，大小:', formatFileSize(stats.size));
     } catch (err) {
-        console.error('文件不存在:', filePath, err);
-        alert(`文件不存在: ${filePath}`);
+        console.error('文件不存在或无法访问:', filePath, err);
+        alert(`文件不存在或无法访问: ${filePath}`);
         return;
     }
     
     // 获取选中的设备
-    const selectedDevice = document.querySelector('.device-item.selected');
-    if (!selectedDevice) {
+    if (!selectedDeviceIp) {
         alert('请先选择一个目标设备');
         return;
     }
 
     const targetDevice = {
-        ip: selectedDevice.dataset.ip,
-        name: selectedDevice.querySelector('.device-name').textContent
+        ip: selectedDeviceIp,
+        name: devices.get(selectedDeviceIp)?.name || '未知设备'
     };
     
     console.log('传输目标设备:', targetDevice);
@@ -247,6 +262,7 @@ async function shareFile(filePath) {
     const transfer = {
         id: transferId,
         filePath: filePath,
+        fileName: path.basename(filePath),
         progress: 0,
         status: 'pending'
     };
@@ -264,8 +280,8 @@ async function shareFile(filePath) {
         
         console.log('传输开始结果:', result);
         
-        // 检查是否有错误
-        if (result && result.error) {
+        // 检查是否有错误或结果是字符串（transferId）
+        if (typeof result === 'object' && result.error) {
             alert(`传输失败: ${result.error}`);
             transfers.delete(transferId);
             updateTransferList();
@@ -273,26 +289,43 @@ async function shareFile(filePath) {
             return;
         }
 
+        // 确保只有一个传输进度监听器
+        ipcRenderer.removeAllListeners('transfer-progress');
+        ipcRenderer.removeAllListeners('transfer-completed'); 
+        ipcRenderer.removeAllListeners('transfer-error');
+
         // 监听传输进度
         ipcRenderer.on('transfer-progress', (event, data) => {
-            if (data.id === transferId) {
+            const transfer = transfers.get(data.id);
+            if (transfer) {
                 transfer.progress = data.progress;
+                transfer.speed = data.speed;
                 updateTransferList();
             }
         });
 
         // 监听传输完成
         ipcRenderer.on('transfer-completed', (event, id) => {
-            if (id === transferId) {
+            const transfer = transfers.get(id);
+            if (transfer) {
                 transfer.status = 'completed';
                 transfer.progress = 100;
                 updateTransferList();
+                
+                // 显示完成通知
+                if (Notification.permission === 'granted') {
+                    new Notification('文件传输完成', {
+                        body: `文件 ${path.basename(transfer.filePath)} 已成功发送`,
+                        icon: 'icon.png'
+                    });
+                }
             }
         });
 
         // 监听传输错误
         ipcRenderer.on('transfer-error', (event, data) => {
-            if (data.id === transferId) {
+            const transfer = transfers.get(data.id);
+            if (transfer) {
                 transfer.status = 'error';
                 alert(`传输失败: ${data.error}`);
                 updateTransferList();
