@@ -19,14 +19,26 @@ let files = [];
 let transfers = new Map();
 let receives = new Map();
 let selectedDeviceIp = null;
+let localIPs = []; // 保存本机IP列表
+
+// 接收本机IP列表
+ipcRenderer.on('local-ips', (event, ips) => {
+    console.log('收到本机IP列表:', ips);
+    localIPs = ips;
+});
+
+// 检查IP是否为本机IP
+function isLocalIP(ip) {
+    return localIPs.includes(ip) || ip === '127.0.0.1' || ip === 'localhost';
+}
 
 // 设备发现处理
 ipcRenderer.on('device-discovered', (event, deviceInfo) => {
     console.log('发现设备:', deviceInfo);
     
     // 检查是否是本机IP
-    if (deviceInfo.ip === '127.0.0.1' || deviceInfo.ip === 'localhost') {
-        console.log('忽略本机设备');
+    if (isLocalIP(deviceInfo.ip)) {
+        console.log('忽略本机设备:', deviceInfo.ip);
         return;
     }
     
@@ -210,7 +222,8 @@ async function shareFile(filePath) {
     console.log('传输目标设备:', targetDevice);
     
     // 检查是否正在向自己发送
-    if (targetDevice.ip === '127.0.0.1' || targetDevice.ip === 'localhost') {
+    if (isLocalIP(targetDevice.ip)) {
+        console.error('阻止向自己发送文件:', targetDevice.ip);
         alert('不能向自己发送文件。请选择其他设备作为目标。');
         return;
     }

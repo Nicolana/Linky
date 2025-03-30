@@ -115,14 +115,47 @@ function initExpressServer() {
     });
 }
 
+// 获取本机所有 IP 地址
+function getAllLocalIPs() {
+    const interfaces = require('os').networkInterfaces();
+    const allIPs = [];
+    
+    for (const name of Object.keys(interfaces)) {
+        for (const interface of interfaces[name]) {
+            // 只考虑IPv4地址，排除回环地址
+            if (interface.family === 'IPv4' && !interface.internal) {
+                allIPs.push(interface.address);
+            }
+        }
+    }
+    
+    // 始终包含本地回环地址
+    allIPs.push('127.0.0.1');
+    allIPs.push('localhost');
+    
+    return allIPs;
+}
+
+// 获取主要的本机 IP 地址 (兼容旧代码)
+function getLocalIP() {
+    const allIPs = getAllLocalIPs();
+    return allIPs.length > 0 ? allIPs[0] : '127.0.0.1';
+}
+
+// 检查IP是否是本机IP
+function isLocalIP(ip) {
+    const allLocalIPs = getAllLocalIPs();
+    return allLocalIPs.includes(ip);
+}
+
 // 初始化 UDP 广播服务
 function initBroadcastServer() {
     // 创建 UDP socket
     broadcastServer = dgram.createSocket('udp4');
     
-    // 获取本机IP
-    const localIP = getLocalIP();
-    console.log('本机IP:', localIP);
+    // 获取本机所有IP
+    const localIPs = getAllLocalIPs();
+    console.log('本机所有IP:', localIPs);
     
     // 监听消息
     broadcastServer.on('message', (msg, rinfo) => {
@@ -133,8 +166,8 @@ function initBroadcastServer() {
             deviceInfo.lastSeen = Date.now();
             
             // 检查是否是本机设备（过滤掉自己）
-            if (deviceInfo.ip === localIP) {
-                console.log('收到本机广播，已忽略');
+            if (isLocalIP(deviceInfo.ip)) {
+                console.log('收到本机广播，已忽略', deviceInfo.ip);
                 return;
             }
             
@@ -159,7 +192,7 @@ function initBroadcastServer() {
     setInterval(() => {
         const deviceInfo = {
             name: app.getName(),
-            ip: localIP, // 使用缓存的本机IP
+            ip: localIPs[0], // 使用缓存的本机IP
             status: 'online',
             lastSeen: Date.now(),
             sharedDir: store.get('sharedDir') || path.join(app.getPath('home'), 'SharedFiles')
@@ -184,19 +217,6 @@ function initBroadcastServer() {
             currentTime: now
         });
     }, 5000);
-}
-
-// 获取本机 IP 地址
-function getLocalIP() {
-    const interfaces = require('os').networkInterfaces();
-    for (const name of Object.keys(interfaces)) {
-        for (const interface of interfaces[name]) {
-            if (interface.family === 'IPv4' && !interface.internal) {
-                return interface.address;
-            }
-        }
-    }
-    return '127.0.0.1';
 }
 
 // 生成文件ID
@@ -279,9 +299,8 @@ async function checkDeviceConnectivity(ip, port, timeout = 3000) {
 // 处理文件传输请求
 ipcMain.handle('start-transfer', async (event, { filePath, targetDevice }) => {
     // 检查目标设备是否是本机
-    const localIP = getLocalIP();
-    if (targetDevice.ip === localIP || targetDevice.ip === '127.0.0.1' || targetDevice.ip === 'localhost') {
-        console.error('尝试向自己发送文件');
+    if (isLocalIP(targetDevice.ip)) {
+        console.error(`尝试向自己发送文件 (${targetDevice.ip})`);
         return { 
             error: '不能向自己发送文件。请选择其他设备作为目标。', 
             code: 'SELF_TRANSFER' 
@@ -500,7 +519,17 @@ function initFileReceiveServer() {
     
     // 创建TCP服务器
     fileReceiveServer = net.createServer((socket) => {
-        console.log('新的文件传输连接');
+        // 获取客户端IP
+        const clientIP = socket.remoteAddress.replace(/^::ffff:/, ''); // 移除IPv6前缀
+        console.log(`新的文件传输连接，来源IP: ${clientIP}`);
+        
+        // 检查是否是来自本机的连接
+        if (isLocalIP(clientIP)) {
+            console.log(`拒绝来自本机的连接 (${clientIP})`);
+            socket.end();
+            return;
+        }
+        
         let fileInfo = null;
         let fileStream = null;
         let receivedBytes = 0;
@@ -602,6 +631,14 @@ function initFileReceiveServer() {
 // 应用启动
 app.whenReady().then(() => {
     createWindow();
+    
+    // 等待主窗口创建完成后发送本机IP列表
+    mainWindow.webContents.on('did-finish-load', () => {
+        const localIPs = getAllLocalIPs();
+        console.log('向渲染进程发送本机IP列表:', localIPs);
+        mainWindow.webContents.send('local-ips', localIPs);
+    });
+    
     initExpressServer();
     initBroadcastServer();
     initFileReceiveServer();
