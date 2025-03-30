@@ -16,6 +16,7 @@ const transferCount = document.getElementById('transferCount');
 let devices = new Map();
 let files = [];
 let transfers = new Map();
+let selectedDeviceIp = null; // 添加选中设备IP的存储
 
 // 设备发现处理
 ipcRenderer.on('device-discovered', (event, deviceInfo) => {
@@ -27,7 +28,7 @@ ipcRenderer.on('device-discovered', (event, deviceInfo) => {
 function updateDeviceList() {
     deviceList.innerHTML = Array.from(devices.values())
         .map(device => `
-            <div class="device-item" data-ip="${device.ip}">
+            <div class="device-item ${device.ip === selectedDeviceIp ? 'selected' : ''}" data-ip="${device.ip}">
                 <div class="device-status ${device.status === 'online' ? 'status-online' : 'status-offline'}"></div>
                 <div class="device-info">
                     <div class="device-name">${device.name}</div>
@@ -39,6 +40,8 @@ function updateDeviceList() {
     // 添加设备选择事件监听
     deviceList.querySelectorAll('.device-item').forEach(item => {
         item.addEventListener('click', () => {
+            // 更新选中设备IP
+            selectedDeviceIp = item.dataset.ip;
             // 移除其他设备的选中状态
             deviceList.querySelectorAll('.device-item').forEach(d => d.classList.remove('selected'));
             // 添加当前设备的选中状态
