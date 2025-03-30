@@ -10,7 +10,8 @@
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac",
     "build:linux": "electron-builder --linux",
-    "build:all": "electron-builder -mwl"
+    "build:all": "electron-builder -mwl",
+    "release": "electron-builder -p always"
   },
   "author": "",
   "license": "MIT",
@@ -89,6 +90,11 @@
           "path": "/Applications"
         }
       ]
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Nicolana",
+      "repo": "Linky"
     }
   }
 } 
