@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>局域网文件共享</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- 左侧设备列表 -->
+        <div class="device-panel">
+            <div class="panel-header">
+                <h2>在线设备</h2>
+                <button id="refreshDevices" class="btn-icon">🔄</button>
+            </div>
+            <div id="deviceList" class="device-list"></div>
+        </div>
+
+        <!-- 右侧主区域 -->
+        <div class="main-content">
+            <div class="content-header">
+                <h2>共享文件</h2>
+                <div class="header-actions">
+                    <button id="selectDir" class="btn">选择共享目录</button>
+                    <input type="text" id="searchInput" placeholder="搜索文件..." class="search-input">
+                </div>
+            </div>
+            
+            <div class="file-list">
+                <div class="list-header">
+                    <div class="col-name">文件名</div>
+                    <div class="col-size">大小</div>
+                    <div class="col-date">修改日期</div>
+                    <div class="col-actions">操作</div>
+                </div>
+                <div id="fileList" class="list-content"></div>
+            </div>
+        </div>
+
+        <!-- 底部状态栏 -->
+        <div class="status-bar">
+            <div class="status-item">
+                <span>网速：</span>
+                <span id="networkSpeed">0 KB/s</span>
+            </div>
+            <div class="status-item">
+                <span>传输任务：</span>
+                <span id="transferCount">0</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- 传输进度窗口 -->
+    <div id="transferWindow" class="transfer-window hidden">
+        <div class="transfer-header">
+            <h3>传输任务</h3>
+            <button class="close-btn">×</button>
+        </div>
+        <div id="transferList" class="transfer-list"></div>
+    </div>
+
+    <script src="renderer.js"></script>
+</body>
+</html> 
