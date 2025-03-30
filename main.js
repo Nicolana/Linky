@@ -325,6 +325,31 @@ ipcMain.handle('select-directory', async () => {
     return null;
 });
 
+// 处理设备刷新请求
+ipcMain.on('refresh-devices', (event) => {
+    console.log('收到设备刷新请求');
+    // 立即发送一次广播消息
+    if (broadcastServer) {
+        const deviceInfo = {
+            name: app.getName(),
+            ip: getLocalIP(), // 使用主要的本机IP
+            status: 'online',
+            lastSeen: Date.now(),
+            sharedDir: store.get('sharedDir') || path.join(app.getPath('home'), 'SharedFiles')
+        };
+        
+        // 发送广播消息
+        const message = Buffer.from(JSON.stringify(deviceInfo));
+        
+        // 发送到标准的UDP广播地址
+        broadcastServer.send(message, 0, message.length, 12345, '255.255.255.255', (err) => {
+            if (err) console.error('Error sending broadcast to 255.255.255.255:', err);
+        });
+        
+        console.log('已发送设备刷新广播');
+    }
+});
+
 // 检查设备是否在线并可连接
 async function checkDeviceConnectivity(ip, port, timeout = 3000) {
     return new Promise((resolve) => {
@@ -448,6 +473,15 @@ function startFileTransfer(transfer) {
         const stats = fs.statSync(transfer.filePath);
         const fileSize = stats.size;
         
+        // 创建到目标设备的连接
+        const client = new (require('net').Socket)();
+        
+        // 设置连接超时
+        client.setTimeout(5000);
+        
+        // 标记客户端状态
+        let isClientClosed = false;
+        
         // 创建文件读取流
         const fileStream = fs.createReadStream(transfer.filePath);
         let transferredBytes = 0;
@@ -459,7 +493,8 @@ function startFileTransfer(transfer) {
             transfer.status = 'error';
             transfer.error = `文件读取错误: ${error.message}`;
             
-            if (client && !client.destroyed) {
+            if (client && !isClientClosed) {
+                isClientClosed = true;
                 client.destroy();
             }
             
@@ -470,19 +505,17 @@ function startFileTransfer(transfer) {
             });
         });
         
-        // 创建到目标设备的连接
-        const client = new (require('net').Socket)();
-        
-        // 设置连接超时
-        client.setTimeout(5000);
-        
         // 处理连接超时
         client.on('timeout', () => {
             console.error(`连接超时: ${transfer.targetDevice.ip}:3001`);
             transfer.status = 'error';
             transfer.error = '连接超时';
             fileStream.destroy();
-            client.destroy();
+            
+            if (!isClientClosed) {
+                isClientClosed = true;
+                client.destroy();
+            }
             
             // 通知渲染进程传输错误
             mainWindow.webContents.send('transfer-error', {
@@ -498,6 +531,10 @@ function startFileTransfer(transfer) {
             transfer.error = `连接错误: ${error.message}`;
             fileStream.destroy();
             
+            if (!isClientClosed) {
+                isClientClosed = true;
+            }
+            
             // 通知渲染进程传输错误
             mainWindow.webContents.send('transfer-error', {
                 id: transfer.id,
@@ -505,55 +542,119 @@ function startFileTransfer(transfer) {
             });
         });
         
+        // 处理连接关闭
+        client.on('close', () => {
+            console.log(`连接关闭: ${transfer.targetDevice.ip}:3001`);
+            isClientClosed = true;
+            
+            // 如果传输未完成且状态不是error或cancelled，则报告错误
+            if (transfer.progress < 100 && 
+                transfer.status !== 'error' && 
+                transfer.status !== 'cancelled') {
+                transfer.status = 'error';
+                transfer.error = '连接意外关闭';
+                
+                // 通知渲染进程传输错误
+                mainWindow.webContents.send('transfer-error', {
+                    id: transfer.id,
+                    error: '连接意外关闭，传输未完成'
+                });
+            }
+            
+            // 清理文件流
+            fileStream.destroy();
+        });
+        
         client.connect(3001, transfer.targetDevice.ip);
         
         client.on('connect', () => {
             console.log(`已连接到设备: ${transfer.targetDevice.ip}:3001`);
             transfer.status = 'transferring';
+            
             // 发送文件信息
             client.write(JSON.stringify({
                 fileName: path.basename(transfer.filePath),
                 fileSize,
                 transferId: transfer.id
             }) + '\n');
-        });
-        
-        fileStream.on('data', (chunk) => {
-            if (transfer.status === 'cancelled') {
-                fileStream.destroy();
-                client.destroy();
-                return;
-            }
             
-            // 确保客户端连接可写
-            if (client.writable) {
-                client.write(chunk);
-                transferredBytes += chunk.length;
-                transfer.progress = (transferredBytes / fileSize) * 100;
-                
-                // 更新传输速度
-                const now = Date.now();
-                if (now - lastSpeedUpdate >= 1000) {
-                    transfer.speed = transferredBytes / ((now - transfer.startTime) / 1000);
-                    lastSpeedUpdate = now;
+            // 设置数据流传输
+            fileStream.on('data', (chunk) => {
+                if (transfer.status === 'cancelled' || isClientClosed) {
+                    fileStream.destroy();
+                    
+                    if (!isClientClosed) {
+                        isClientClosed = true;
+                        client.destroy();
+                    }
+                    return;
                 }
                 
-                // 通知渲染进程更新进度
-                mainWindow.webContents.send('transfer-progress', {
-                    id: transfer.id,
-                    progress: transfer.progress,
-                    speed: transfer.speed
-                });
-            }
-        });
-        
-        fileStream.on('end', () => {
-            transfer.status = 'completed';
-            if (client.writable) {
-                client.end();
-            }
-            // 通知渲染进程传输完成
-            mainWindow.webContents.send('transfer-completed', transfer.id);
+                // 确保客户端连接可写
+                if (client.writable) {
+                    // 使用drain事件处理背压
+                    const canContinue = client.write(chunk);
+                    
+                    if (!canContinue) {
+                        // 暂停文件流直到socket准备好接收更多数据
+                        fileStream.pause();
+                        
+                        client.once('drain', () => {
+                            // 当socket准备好时恢复文件流
+                            if (!fileStream.destroyed) {
+                                fileStream.resume();
+                            }
+                        });
+                    }
+                    
+                    transferredBytes += chunk.length;
+                    transfer.progress = (transferredBytes / fileSize) * 100;
+                    
+                    // 更新传输速度
+                    const now = Date.now();
+                    if (now - lastSpeedUpdate >= 1000) {
+                        transfer.speed = transferredBytes / ((now - transfer.startTime) / 1000);
+                        lastSpeedUpdate = now;
+                    }
+                    
+                    // 通知渲染进程更新进度
+                    mainWindow.webContents.send('transfer-progress', {
+                        id: transfer.id,
+                        progress: transfer.progress,
+                        speed: transfer.speed
+                    });
+                } else if (!isClientClosed) {
+                    // 如果客户端不可写但未关闭，中止传输
+                    console.error('客户端连接不可写，中止传输');
+                    transfer.status = 'error';
+                    transfer.error = '连接中断';
+                    fileStream.destroy();
+                    
+                    isClientClosed = true;
+                    client.destroy();
+                    
+                    // 通知渲染进程传输错误
+                    mainWindow.webContents.send('transfer-error', {
+                        id: transfer.id,
+                        error: '连接中断，传输失败'
+                    });
+                }
+            });
+            
+            fileStream.on('end', () => {
+                if (transfer.status !== 'cancelled' && transfer.status !== 'error') {
+                    transfer.status = 'completed';
+                    
+                    // 通知渲染进程传输完成
+                    mainWindow.webContents.send('transfer-completed', transfer.id);
+                    
+                    // 确保所有数据都被刷新后再关闭连接
+                    if (client.writable && !isClientClosed) {
+                        isClientClosed = true;
+                        client.end();
+                    }
+                }
+            });
         });
     } catch (error) {
         console.error(`文件传输初始化错误: ${error.message}`);
@@ -596,86 +697,206 @@ function initFileReceiveServer() {
         let fileInfo = null;
         let fileStream = null;
         let receivedBytes = 0;
+        let fileProcessingActive = true;
+        
+        // 设置超时
+        socket.setTimeout(60000); // 60秒超时
+        
+        // 处理超时
+        socket.on('timeout', () => {
+            console.error(`接收文件连接超时，来源IP: ${clientIP}`);
+            fileProcessingActive = false;
+            
+            if (fileStream) {
+                fileStream.end();
+            }
+            
+            socket.end();
+        });
         
         // 处理数据
         socket.on('data', (data) => {
-            // 如果还没有收到文件信息，尝试解析文件信息
-            if (!fileInfo) {
-                try {
-                    // 尝试从数据中解析出JSON信息和文件内容
-                    const dataStr = data.toString();
-                    const newlineIndex = dataStr.indexOf('\n');
-                    
-                    if (newlineIndex !== -1) {
-                        // 提取JSON信息
-                        const jsonStr = dataStr.substring(0, newlineIndex);
-                        fileInfo = JSON.parse(jsonStr);
+            if (!fileProcessingActive) return;
+            
+            try {
+                // 如果还没有收到文件信息，尝试解析文件信息
+                if (!fileInfo) {
+                    try {
+                        // 尝试从数据中解析出JSON信息和文件内容
+                        const dataStr = data.toString();
+                        const newlineIndex = dataStr.indexOf('\n');
                         
-                        console.log('收到文件信息:', fileInfo);
-                        
-                        // 创建保存文件的流
-                        const saveFilePath = path.join(receiveDir, fileInfo.fileName);
-                        fileStream = fs.createWriteStream(saveFilePath);
-                        
-                        // 处理剩余的数据作为文件内容
-                        const remainingData = data.slice(newlineIndex + 1);
-                        if (remainingData.length > 0) {
-                            fileStream.write(remainingData);
-                            receivedBytes += remainingData.length;
+                        if (newlineIndex !== -1) {
+                            // 提取JSON信息
+                            const jsonStr = dataStr.substring(0, newlineIndex);
+                            fileInfo = JSON.parse(jsonStr);
                             
-                            // 通知主窗口更新进度
-                            if (mainWindow) {
-                                mainWindow.webContents.send('receive-progress', {
-                                    fileName: fileInfo.fileName,
-                                    progress: (receivedBytes / fileInfo.fileSize) * 100,
-                                    receivedBytes,
-                                    totalBytes: fileInfo.fileSize
-                                });
+                            console.log('收到文件信息:', fileInfo);
+                            
+                            // 创建保存文件的流
+                            const saveFilePath = path.join(receiveDir, fileInfo.fileName);
+                            
+                            // 检查如果同名文件已存在，则添加时间戳
+                            let finalFilePath = saveFilePath;
+                            if (fs.existsSync(saveFilePath)) {
+                                const ext = path.extname(fileInfo.fileName);
+                                const baseName = path.basename(fileInfo.fileName, ext);
+                                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                                finalFilePath = path.join(receiveDir, `${baseName}_${timestamp}${ext}`);
+                                console.log(`文件已存在，使用新路径: ${finalFilePath}`);
+                            }
+                            
+                            fileStream = fs.createWriteStream(finalFilePath);
+                            
+                            // 处理文件流错误
+                            fileStream.on('error', (err) => {
+                                console.error(`文件写入错误: ${err.message}`);
+                                fileProcessingActive = false;
+                                
+                                try {
+                                    // 尝试删除部分写入的文件
+                                    fs.unlinkSync(finalFilePath);
+                                } catch (deleteErr) {
+                                    console.error(`无法删除部分文件: ${deleteErr.message}`);
+                                }
+                                
+                                socket.end();
+                            });
+                            
+                            // 更新文件信息中的路径
+                            fileInfo.filePath = finalFilePath;
+                            
+                            // 处理剩余的数据作为文件内容
+                            const remainingData = data.slice(newlineIndex + 1);
+                            if (remainingData.length > 0) {
+                                fileStream.write(remainingData);
+                                receivedBytes += remainingData.length;
+                                
+                                // 通知主窗口更新进度
+                                if (mainWindow) {
+                                    mainWindow.webContents.send('receive-progress', {
+                                        fileName: path.basename(finalFilePath),
+                                        progress: (receivedBytes / fileInfo.fileSize) * 100,
+                                        receivedBytes,
+                                        totalBytes: fileInfo.fileSize
+                                    });
+                                }
                             }
                         }
+                    } catch (error) {
+                        console.error('解析文件信息错误:', error);
+                        fileProcessingActive = false;
+                        socket.end();
                     }
-                } catch (error) {
-                    console.error('解析文件信息错误:', error);
+                } else {
+                    // 继续接收文件内容
+                    if (fileStream && fileStream.writable) {
+                        // 使用drain事件处理背压
+                        const canContinue = fileStream.write(data);
+                        receivedBytes += data.length;
+                        
+                        if (!canContinue) {
+                            // 如果文件流背压，暂停socket
+                            socket.pause();
+                            
+                            fileStream.once('drain', () => {
+                                // 文件流准备好继续，恢复socket
+                                if (!socket.destroyed) {
+                                    socket.resume();
+                                }
+                            });
+                        }
+                        
+                        // 通知主窗口更新进度
+                        if (mainWindow) {
+                            mainWindow.webContents.send('receive-progress', {
+                                fileName: path.basename(fileInfo.filePath),
+                                progress: (receivedBytes / fileInfo.fileSize) * 100,
+                                receivedBytes,
+                                totalBytes: fileInfo.fileSize
+                            });
+                        }
+                    } else {
+                        // 文件流出错，结束socket
+                        fileProcessingActive = false;
+                        socket.end();
+                    }
                 }
-            } else {
-                // 继续接收文件内容
-                fileStream.write(data);
-                receivedBytes += data.length;
+            } catch (err) {
+                console.error('处理接收数据时出错:', err);
+                fileProcessingActive = false;
                 
-                // 通知主窗口更新进度
-                if (mainWindow) {
-                    mainWindow.webContents.send('receive-progress', {
-                        fileName: fileInfo.fileName,
-                        progress: (receivedBytes / fileInfo.fileSize) * 100,
-                        receivedBytes,
-                        totalBytes: fileInfo.fileSize
-                    });
+                if (fileStream) {
+                    fileStream.end();
                 }
+                
+                socket.end();
             }
         });
         
         // 处理连接关闭
         socket.on('close', () => {
             console.log('文件传输连接关闭');
+            
             if (fileStream) {
-                fileStream.end();
-                
-                // 通知主窗口文件接收完成
-                if (mainWindow && fileInfo) {
-                    mainWindow.webContents.send('receive-completed', {
-                        fileName: fileInfo.fileName,
-                        filePath: path.join(receiveDir, fileInfo.fileName),
-                        fileSize: fileInfo.fileSize
-                    });
-                }
+                fileStream.end(() => {
+                    // 检查文件是否完全接收
+                    if (fileInfo && receivedBytes > 0) {
+                        let isComplete = false;
+                        
+                        // 检查文件大小是否匹配或接近
+                        try {
+                            const stats = fs.statSync(fileInfo.filePath);
+                            // 如果接收的字节数与文件信息中的大小接近（允许5%误差）
+                            const sizeMatch = Math.abs(stats.size - fileInfo.fileSize) / fileInfo.fileSize < 0.05;
+                            isComplete = sizeMatch || receivedBytes >= fileInfo.fileSize;
+                        } catch (err) {
+                            console.error(`检查文件状态出错: ${err.message}`);
+                            isComplete = false;
+                        }
+                        
+                        if (isComplete) {
+                            // 通知主窗口文件接收完成
+                            if (mainWindow) {
+                                mainWindow.webContents.send('receive-completed', {
+                                    fileName: path.basename(fileInfo.filePath),
+                                    filePath: fileInfo.filePath,
+                                    fileSize: fileInfo.fileSize
+                                });
+                            }
+                        } else {
+                            console.log(`文件接收不完整: ${receivedBytes}/${fileInfo.fileSize} 字节`);
+                            
+                            // 尝试删除不完整文件
+                            try {
+                                fs.unlinkSync(fileInfo.filePath);
+                                console.log(`已删除不完整文件: ${fileInfo.filePath}`);
+                            } catch (err) {
+                                console.error(`删除不完整文件出错: ${err.message}`);
+                            }
+                        }
+                    }
+                });
             }
         });
         
         // 处理错误
         socket.on('error', (error) => {
             console.error('文件传输连接错误:', error);
+            fileProcessingActive = false;
+            
             if (fileStream) {
                 fileStream.end();
+                
+                // 尝试删除不完整文件
+                if (fileInfo && fileInfo.filePath) {
+                    try {
+                        fs.unlinkSync(fileInfo.filePath);
+                        console.log(`已删除不完整文件: ${fileInfo.filePath}`);
+                    } catch (err) {
+                        console.error(`删除不完整文件出错: ${err.message}`);
+                    }
+                }
             }
         });
     });
@@ -683,6 +904,20 @@ function initFileReceiveServer() {
     // 监听错误
     fileReceiveServer.on('error', (error) => {
         console.error('文件接收服务器错误:', error);
+        
+        // 尝试重启服务器
+        setTimeout(() => {
+            try {
+                if (fileReceiveServer) {
+                    fileReceiveServer.close();
+                }
+                
+                console.log('尝试重启文件接收服务器...');
+                initFileReceiveServer();
+            } catch (restartError) {
+                console.error('重启文件接收服务器失败:', restartError);
+            }
+        }, 5000);
     });
     
     // 开始监听
