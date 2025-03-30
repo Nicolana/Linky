@@ -35,6 +35,16 @@ function updateDeviceList() {
                 </div>
             </div>
         `).join('');
+
+    // 添加设备选择事件监听
+    deviceList.querySelectorAll('.device-item').forEach(item => {
+        item.addEventListener('click', () => {
+            // 移除其他设备的选中状态
+            deviceList.querySelectorAll('.device-item').forEach(d => d.classList.remove('selected'));
+            // 添加当前设备的选中状态
+            item.classList.add('selected');
+        });
+    });
 }
 
 // 选择共享目录
@@ -109,7 +119,7 @@ function formatDate(date) {
 }
 
 // 分享文件
-function shareFile(filePath) {
+async function shareFile(filePath) {
     const transferId = Date.now().toString();
     const transfer = {
         id: transferId,
@@ -121,6 +131,52 @@ function shareFile(filePath) {
     transfers.set(transferId, transfer);
     updateTransferList();
     updateTransferCount();
+
+    try {
+        // 获取选中的设备
+        const selectedDevice = document.querySelector('.device-item.selected');
+        if (!selectedDevice) {
+            alert('请先选择一个目标设备');
+            return;
+        }
+
+        const targetDevice = {
+            ip: selectedDevice.dataset.ip,
+            name: selectedDevice.querySelector('.device-name').textContent
+        };
+
+        // 通知主进程开始传输
+        await ipcRenderer.invoke('start-transfer', {
+            filePath,
+            targetDevice
+        });
+
+        // 监听传输进度
+        ipcRenderer.on(`transfer-progress-${transferId}`, (event, progress) => {
+            transfer.progress = progress;
+            updateTransferList();
+        });
+
+        // 监听传输完成
+        ipcRenderer.once(`transfer-complete-${transferId}`, () => {
+            transfer.status = 'completed';
+            updateTransferList();
+        });
+
+        // 监听传输错误
+        ipcRenderer.once(`transfer-error-${transferId}`, (event, error) => {
+            transfer.status = 'error';
+            alert(`传输失败: ${error}`);
+            updateTransferList();
+        });
+
+    } catch (error) {
+        console.error('传输启动失败:', error);
+        alert('传输启动失败，请重试');
+        transfers.delete(transferId);
+        updateTransferList();
+        updateTransferCount();
+    }
 }
 
 // 更新传输列表
