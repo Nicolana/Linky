@@ -11,6 +11,7 @@ const store = new Store();
 
 let mainWindow;
 let expressApp;
+let httpServer;
 let broadcastServer;
 let transferTasks = new Map();
 
@@ -108,7 +109,7 @@ function initExpressServer() {
         res.json(transfer);
     });
     
-    expressApp.listen(3000, () => {
+    httpServer = expressApp.listen(3000, () => {
         console.log('Express server running on port 3000');
     });
 }
@@ -117,15 +118,6 @@ function initExpressServer() {
 function initBroadcastServer() {
     // 创建 UDP socket
     broadcastServer = dgram.createSocket('udp4');
-    
-    // 设置广播选项
-    broadcastServer.setBroadcast(true);
-    
-    // 绑定端口
-    broadcastServer.bind(12345, () => {
-        // 加入广播组
-        broadcastServer.addMembership('224.0.0.114');
-    });
     
     // 监听消息
     broadcastServer.on('message', (msg, rinfo) => {
@@ -140,6 +132,16 @@ function initBroadcastServer() {
         } catch (error) {
             console.error('Error parsing device info:', error);
         }
+    });
+    
+    // 绑定端口，然后设置广播选项
+    broadcastServer.bind(12345, () => {
+        // 设置广播选项
+        broadcastServer.setBroadcast(true);
+        // 加入广播组
+        broadcastServer.addMembership('224.0.0.114');
+        
+        console.log('UDP broadcast server initialized on port 12345');
     });
     
     // 定期广播本机信息
@@ -351,7 +353,7 @@ app.on('before-quit', () => {
     if (broadcastServer) {
         broadcastServer.close();
     }
-    if (expressApp) {
-        expressApp.close();
+    if (httpServer) {
+        httpServer.close();
     }
 }); 
