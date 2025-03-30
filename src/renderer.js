@@ -11,12 +11,14 @@ const transferWindow = document.getElementById('transferWindow');
 const transferList = document.getElementById('transferList');
 const networkSpeed = document.getElementById('networkSpeed');
 const transferCount = document.getElementById('transferCount');
+const receiveList = document.getElementById('receiveList');
 
 // 状态管理
 let devices = new Map();
 let files = [];
 let transfers = new Map();
-let selectedDeviceIp = null; // 添加选中设备IP的存储
+let receives = new Map();
+let selectedDeviceIp = null;
 
 // 设备发现处理
 ipcRenderer.on('device-discovered', (event, deviceInfo) => {
@@ -282,6 +284,94 @@ function updateNetworkSpeed(speed) {
     networkSpeed.textContent = `${formatFileSize(speed)}/s`;
 }
 
+// 监听文件接收进度
+ipcRenderer.on('receive-progress', (event, data) => {
+    // 更新或创建接收记录
+    if (!receives.has(data.fileName)) {
+        receives.set(data.fileName, {
+            fileName: data.fileName,
+            progress: data.progress,
+            receivedBytes: data.receivedBytes,
+            totalBytes: data.totalBytes,
+            status: 'receiving'
+        });
+    } else {
+        const receive = receives.get(data.fileName);
+        receive.progress = data.progress;
+        receive.receivedBytes = data.receivedBytes;
+    }
+    
+    // 更新接收列表
+    updateReceiveList();
+    
+    // 显示通知
+    if (Notification.permission === 'granted' && data.progress === 0) {
+        new Notification('正在接收文件', {
+            body: `正在接收 ${data.fileName}`,
+            icon: 'icon.png'
+        });
+    }
+});
+
+// 监听文件接收完成
+ipcRenderer.on('receive-completed', (event, data) => {
+    // 更新接收记录
+    if (receives.has(data.fileName)) {
+        const receive = receives.get(data.fileName);
+        receive.status = 'completed';
+        receive.progress = 100;
+        receive.filePath = data.filePath;
+        
+        // 更新接收列表
+        updateReceiveList();
+        
+        // 显示通知
+        if (Notification.permission === 'granted') {
+            const notification = new Notification('文件接收完成', {
+                body: `${data.fileName} 已接收完成`,
+                icon: 'icon.png'
+            });
+            
+            // 点击通知打开文件
+            notification.onclick = () => {
+                const { shell } = require('electron');
+                shell.showItemInFolder(data.filePath);
+            };
+        }
+    }
+});
+
+// 更新接收列表
+function updateReceiveList() {
+    if (!receiveList) return; // 防止元素不存在
+    
+    receiveList.innerHTML = Array.from(receives.values())
+        .map(receive => `
+            <div class="receive-item">
+                <div class="receive-info">
+                    <div class="receive-name">${receive.fileName}</div>
+                    <div class="receive-progress">
+                        <div class="progress-bar">
+                            <div class="progress-bar-fill" style="width: ${receive.progress}%"></div>
+                        </div>
+                        <span>${receive.progress.toFixed(1)}% - ${formatFileSize(receive.receivedBytes)} / ${formatFileSize(receive.totalBytes)}</span>
+                    </div>
+                </div>
+                <div class="receive-actions">
+                    ${receive.status === 'completed' ? 
+                        `<button class="btn-icon" onclick="openReceivedFile('${receive.filePath}')">📂</button>` : 
+                        ''}
+                </div>
+            </div>
+        `).join('');
+}
+
+// 打开接收的文件
+function openReceivedFile(filePath) {
+    const { shell } = require('electron');
+    shell.showItemInFolder(filePath);
+}
+
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
     // 加载已保存的共享目录
@@ -296,4 +386,9 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log(`文件路径长度: ${path.length}`);
         console.log(`文件路径编码: ${encodeURIComponent(path)}`);
     };
+    
+    // 请求通知权限
+    if (Notification.permission !== 'granted') {
+        Notification.requestPermission();
+    }
 }); 
