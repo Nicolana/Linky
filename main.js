@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const express = require('express');
-const broadcast = require('node-broadcast');
+const dgram = require('dgram');
 const Store = require('electron-store');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -115,8 +115,19 @@ function initExpressServer() {
 
 // 初始化 UDP 广播服务
 function initBroadcastServer() {
-    broadcastServer = broadcast.createServer(12345);
+    // 创建 UDP socket
+    broadcastServer = dgram.createSocket('udp4');
     
+    // 设置广播选项
+    broadcastServer.setBroadcast(true);
+    
+    // 绑定端口
+    broadcastServer.bind(12345, () => {
+        // 加入广播组
+        broadcastServer.addMembership('224.0.0.114');
+    });
+    
+    // 监听消息
     broadcastServer.on('message', (msg, rinfo) => {
         try {
             const deviceInfo = JSON.parse(msg.toString());
@@ -140,7 +151,14 @@ function initBroadcastServer() {
             lastSeen: Date.now(),
             sharedDir: store.get('sharedDir') || path.join(app.getPath('home'), 'SharedFiles')
         };
-        broadcastServer.send(JSON.stringify(deviceInfo));
+        
+        // 发送广播消息
+        const message = Buffer.from(JSON.stringify(deviceInfo));
+        broadcastServer.send(message, 0, message.length, 12345, '224.0.0.114', (err) => {
+            if (err) {
+                console.error('Error sending broadcast:', err);
+            }
+        });
     }, 5000);
     
     // 定期清理离线设备
