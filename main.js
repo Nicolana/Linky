@@ -153,8 +153,21 @@ function initBroadcastServer() {
     // 创建 UDP socket
     broadcastServer = dgram.createSocket('udp4');
     
-    // 获取本机所有IP
+    // 获取本机所有IP和子网信息
+    const interfaces = require('os').networkInterfaces();
     const localIPs = getAllLocalIPs();
+    
+    // 打印所有网络接口信息以便调试
+    console.log('所有网络接口信息:');
+    for (const name of Object.keys(interfaces)) {
+        console.log(`接口 ${name}:`);
+        for (const iface of interfaces[name]) {
+            if (iface.family === 'IPv4') {
+                console.log(`  地址: ${iface.address}, 掩码: ${iface.netmask}, 内部: ${iface.internal}`);
+            }
+        }
+    }
+    
     console.log('本机所有IP:', localIPs);
     
     // 监听消息
@@ -171,6 +184,7 @@ function initBroadcastServer() {
                 return;
             }
             
+            console.log(`接收到来自 ${deviceInfo.ip} 的设备信息: ${deviceInfo.name}`);
             // 通知渲染进程发现新设备
             mainWindow.webContents.send('device-discovered', deviceInfo);
         } catch (error) {
@@ -178,21 +192,24 @@ function initBroadcastServer() {
         }
     });
     
-    // 绑定端口，然后设置广播选项
-    broadcastServer.bind(12345, () => {
+    // 设置服务器选项
+    broadcastServer.on('listening', () => {
         // 设置广播选项
         broadcastServer.setBroadcast(true);
-        // 加入广播组
-        broadcastServer.addMembership('224.0.0.114');
-        
+        const address = broadcastServer.address();
+        console.log(`UDP服务器监听 ${address.address}:${address.port}`);
+    });
+    
+    // 绑定端口
+    broadcastServer.bind(12345, () => {
         console.log('UDP broadcast server initialized on port 12345');
     });
     
-    // 定期广播本机信息
+    // 定期广播本机信息到多个地址
     setInterval(() => {
         const deviceInfo = {
             name: app.getName(),
-            ip: localIPs[0], // 使用缓存的本机IP
+            ip: localIPs[0], // 使用主要的本机IP
             status: 'online',
             lastSeen: Date.now(),
             sharedDir: store.get('sharedDir') || path.join(app.getPath('home'), 'SharedFiles')
@@ -200,11 +217,36 @@ function initBroadcastServer() {
         
         // 发送广播消息
         const message = Buffer.from(JSON.stringify(deviceInfo));
-        broadcastServer.send(message, 0, message.length, 12345, '224.0.0.114', (err) => {
-            if (err) {
-                console.error('Error sending broadcast:', err);
-            }
+        
+        // 1. 发送到标准的UDP广播地址
+        broadcastServer.send(message, 0, message.length, 12345, '255.255.255.255', (err) => {
+            if (err) console.error('Error sending broadcast to 255.255.255.255:', err);
         });
+        
+        // 2. 发送到之前使用的组播地址
+        broadcastServer.send(message, 0, message.length, 12345, '224.0.0.114', (err) => {
+            if (err) console.error('Error sending multicast to 224.0.0.114:', err);
+        });
+        
+        // 3. 针对每个网络接口发送子网广播
+        for (const name of Object.keys(interfaces)) {
+            for (const iface of interfaces[name]) {
+                // 只处理IPv4且非内部接口
+                if (iface.family === 'IPv4' && !iface.internal) {
+                    // 计算广播地址
+                    const netmask = iface.netmask;
+                    const ipAddress = iface.address;
+                    const broadcastAddress = calculateBroadcastAddress(ipAddress, netmask);
+                    
+                    if (broadcastAddress) {
+                        console.log(`发送广播到子网: ${broadcastAddress} (来自 ${ipAddress})`);
+                        broadcastServer.send(message, 0, message.length, 12345, broadcastAddress, (err) => {
+                            if (err) console.error(`Error sending broadcast to ${broadcastAddress}:`, err);
+                        });
+                    }
+                }
+            }
+        }
     }, 5000);
     
     // 定期清理离线设备
@@ -217,6 +259,27 @@ function initBroadcastServer() {
             currentTime: now
         });
     }, 5000);
+}
+
+// 计算广播地址
+function calculateBroadcastAddress(ip, netmask) {
+    try {
+        const ipParts = ip.split('.').map(Number);
+        const maskParts = netmask.split('.').map(Number);
+        
+        if (ipParts.length !== 4 || maskParts.length !== 4) {
+            return null;
+        }
+        
+        const broadcastParts = ipParts.map((part, index) => {
+            return (part & maskParts[index]) | (~maskParts[index] & 255);
+        });
+        
+        return broadcastParts.join('.');
+    } catch (error) {
+        console.error('计算广播地址时出错:', error);
+        return null;
+    }
 }
 
 // 生成文件ID

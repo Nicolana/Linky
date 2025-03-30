@@ -36,6 +36,12 @@ function isLocalIP(ip) {
 ipcRenderer.on('device-discovered', (event, deviceInfo) => {
     console.log('发现设备:', deviceInfo);
     
+    // 检查设备信息是否完整
+    if (!deviceInfo || !deviceInfo.ip || !deviceInfo.name) {
+        console.error('收到不完整的设备信息:', deviceInfo);
+        return;
+    }
+    
     // 检查是否是本机IP
     if (isLocalIP(deviceInfo.ip)) {
         console.log('忽略本机设备:', deviceInfo.ip);
@@ -44,7 +50,16 @@ ipcRenderer.on('device-discovered', (event, deviceInfo) => {
     
     // 更新设备信息
     devices.set(deviceInfo.ip, deviceInfo);
+    console.log(`更新设备列表，当前设备数: ${devices.size}`);
     updateDeviceList();
+    
+    // 显示通知
+    if (Notification.permission === 'granted' && !devices.has(deviceInfo.ip)) {
+        new Notification('发现新设备', {
+            body: `${deviceInfo.name} (${deviceInfo.ip})`,
+            icon: 'icon.png'
+        });
+    }
 });
 
 // 清理离线设备
@@ -424,6 +439,23 @@ function openReceivedFile(filePath) {
     shell.showItemInFolder(filePath);
 }
 
+// 刷新设备列表
+function refreshDevices() {
+    console.log('手动刷新设备列表');
+    // 清空过期设备
+    const now = Date.now();
+    const offlineThreshold = 30000; // 30秒无响应视为离线
+    
+    for (const [ip, device] of devices.entries()) {
+        if (now - device.lastSeen > offlineThreshold) {
+            console.log(`移除过期设备: ${device.name} (${ip})`);
+            devices.delete(ip);
+        }
+    }
+    
+    updateDeviceList();
+}
+
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
     // 加载已保存的共享目录
@@ -442,5 +474,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // 请求通知权限
     if (Notification.permission !== 'granted') {
         Notification.requestPermission();
+    }
+    
+    // 添加设备刷新按钮事件
+    const refreshBtn = document.getElementById('refreshDevices');
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', refreshDevices);
     }
 }); 
